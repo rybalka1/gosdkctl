@@ -22,6 +22,7 @@ gosdkctl list
 gosdkctl current
 gosdkctl install <archive.tar.gz>
 gosdkctl migrate-local
+gosdkctl init [zsh|bash]
 gosdkctl switch <goX.Y.Z>
 gosdkctl switch
 gosdkctl choose
@@ -62,7 +63,23 @@ gosdkctl current
 
 ## Временное переключение в оболочке
 
-Бинарник не может напрямую изменить родительскую оболочку, поэтому `gosdkctl env` выводит команды экспорта:
+Сначала установите managed block в конфиг оболочки:
+
+```bash
+gosdkctl init zsh
+```
+
+Для bash:
+
+```bash
+gosdkctl init bash
+```
+
+Команда полностью переписывает только блок между маркерами `# >>> gosdkctl init >>>` и `# <<< gosdkctl init <<<` в `~/.zshrc` или `~/.bashrc`. Остальной пользовательский конфиг не меняется.
+
+После этого в новых shell-сессиях доступны `go`, `gosdkctl`, `go-sdk`, `usego`, `gosetdefault` и `gocurrent`.
+
+Бинарник не может напрямую изменить уже запущенную родительскую оболочку, поэтому `gosdkctl env` также умеет выводить команды экспорта:
 
 ```bash
 eval "$(gosdkctl env go1.24.2)"
@@ -70,7 +87,7 @@ eval "$(gosdkctl env default)"
 eval "$(gosdkctl env /opt/custom-go)"
 ```
 
-Рекомендуемые хелперы для zsh:
+Managed block добавляет такие хелперы:
 
 ```bash
 usego() {
@@ -87,35 +104,6 @@ gocurrent() {
   which go
   go version
 }
-```
-
-Добавьте настройку окружения по умолчанию перед любым ранним `return` в `~/.zshrc`:
-
-```bash
-export GOPATH=$HOME/go
-
-if [[ -z "$GOROOT" ]]; then
-  if [[ -L "$HOME/sdk/go-current" && -x "$HOME/sdk/go-current/bin/go" ]]; then
-    export GOROOT="$HOME/sdk/go-current"
-  elif [[ -d "$HOME/.local/go" ]]; then
-    export GOROOT="$HOME/.local/go"
-  else
-    _latest_go_sdk=$(command find "$HOME/sdk" -maxdepth 1 -mindepth 1 -type d -name 'go[0-9]*' -exec basename {} \; 2>/dev/null | sort -V 2>/dev/null | tail -n 1)
-    if [[ -n "$_latest_go_sdk" ]]; then
-      export GOROOT="$HOME/sdk/$_latest_go_sdk"
-    fi
-    unset _latest_go_sdk
-  fi
-fi
-
-typeset -U path PATH
-path=(
-  ${GOROOT:+$GOROOT/bin}
-  $GOPATH/bin
-  $HOME/sdk
-  $HOME/.local/bin
-  $path
-)
 ```
 
 ## Диагностика

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +20,8 @@ func TestRunHelp(t *testing.T) {
 	if err := command.Run(context.Background(), []string{"-help"}); err != nil {
 		t.Fatalf("Run(-help) error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "gosdkctl migrate-local") {
-		t.Fatalf("help output does not include migrate-local:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "gosdkctl migrate-local") || !strings.Contains(stdout.String(), "gosdkctl init [zsh|bash]") {
+		t.Fatalf("help output does not include expected commands:\n%s", stdout.String())
 	}
 }
 
@@ -57,6 +58,25 @@ func TestRunEnv(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "export GOROOT=") {
 		t.Fatalf("env output = %q", stdout.String())
+	}
+	want := fmt.Sprintf("export GOROOT=%q", filepath.Join(manager.SDKDir, "go1.26.1"))
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("env output = %q, want %q", stdout.String(), want)
+	}
+}
+
+func TestRunInit(t *testing.T) {
+	t.Parallel()
+
+	command, manager, stdout, _ := newTestCommand(t, "")
+	if err := command.Run(context.Background(), []string{"init", "zsh"}); err != nil {
+		t.Fatalf("Run(init zsh) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "updated zsh config") {
+		t.Fatalf("init output = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(manager.Home, ".zshrc")); err != nil {
+		t.Fatalf(".zshrc was not created: %v", err)
 	}
 }
 

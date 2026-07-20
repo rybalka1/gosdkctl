@@ -85,6 +85,52 @@ func TestInstallArchive(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveRejectsExistingBrokenDestination(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	archive := filepath.Join(t.TempDir(), "go1.27.0.linux-amd64.tar.gz")
+	writeArchive(t, archive, "go1.27.0")
+	if err := os.MkdirAll(filepath.Join(manager.cfg.SDKDir, "go1.27.0"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if _, _, err := manager.InstallArchive(context.Background(), archive); err == nil {
+		t.Fatal("InstallArchive() accepted existing broken destination")
+	}
+}
+
+func TestInstallArchiveRejectsVersionRewrite(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	archive := filepath.Join(t.TempDir(), "rewrite.tar.gz")
+	writeArchiveEntries(t, archive, []tarEntry{
+		{name: "go/VERSION", mode: 0o644, body: "go1.27.0\n"},
+		{name: "go/bin/go", mode: 0o755, body: "#!/bin/sh\n"},
+		{name: "go/VERSION", mode: 0o644, body: "go1.28.0\n"},
+	})
+
+	if _, _, err := manager.InstallArchive(context.Background(), archive); err == nil {
+		t.Fatal("InstallArchive() accepted archive with rewritten VERSION")
+	}
+}
+
+func TestInstallArchiveRejectsLargeVersionFile(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	archive := filepath.Join(t.TempDir(), "large-version.tar.gz")
+	writeArchiveEntries(t, archive, []tarEntry{
+		{name: "go/VERSION", mode: 0o644, body: strings.Repeat("x", versionFileLimit+1)},
+		{name: "go/bin/go", mode: 0o755, body: "#!/bin/sh\n"},
+	})
+
+	if _, _, err := manager.InstallArchive(context.Background(), archive); err == nil {
+		t.Fatal("InstallArchive() accepted oversized VERSION")
+	}
+}
+
 func TestInstallArchiveRejectsUnsafeSymlink(t *testing.T) {
 	t.Parallel()
 
@@ -137,6 +183,20 @@ func TestInstallArchiveHandlesHardlink(t *testing.T) {
 	}
 }
 
+func TestSwitchRejectsNonSymlinkCurrent(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	makeSDK(t, manager.cfg.SDKDir, "go1.26.1")
+	if err := os.MkdirAll(manager.cfg.DefaultLink, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if _, err := manager.Switch("go1.26.1"); err == nil {
+		t.Fatal("Switch() replaced non-symlink go-current")
+	}
+}
+
 func TestEnvAcceptsSDKPath(t *testing.T) {
 	t.Parallel()
 
@@ -174,6 +234,77 @@ func TestMigrateLocal(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(manager.cfg.SDKDir, "go1.29.0", "bin", "go")); err != nil {
 		t.Fatalf("migrated SDK missing: %v", err)
+	}
+}
+
+func TestInitShellWritesAndReplacesManagedBlock(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	zshrc := filepath.Join(manager.cfg.Home, ".zshrc")
+	initial := strings.Join([]string{
+		"# user config",
+		managedBlockStart,
+		"old",
+		managedBlockEnd,
+		"usego() {",
+		"  echo old",
+		"}",
+		"",
+		"alias ll='ls -la'",
+		"",
+	}, "\n")
+	if err := os.WriteFile(zshrc, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	result, err := manager.InitShell("zsh")
+	if err != nil {
+		t.Fatalf("InitShell() error = %v", err)
+	}
+	if !result.Changed {
+		t.Fatal("InitShell() did not report changed config")
+	}
+	data, err := os.ReadFile(zshrc)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	got := string(data)
+	if !strings.HasPrefix(got, managedBlockStart) {
+		t.Fatalf("managed block should be at the top:\n%s", got)
+	}
+	if strings.Contains(got, "\nold\n") {
+		t.Fatalf("managed block was not replaced:\n%s", got)
+	}
+	if strings.Contains(got, "echo old") {
+		t.Fatalf("legacy usego function was not removed:\n%s", got)
+	}
+	if !strings.Contains(got, `eval "$(gosdkctl env "${1:-default}")"`) {
+		t.Fatalf("managed block does not contain usego helper:\n%s", got)
+	}
+	if !strings.Contains(got, "alias ll='ls -la'") {
+		t.Fatalf("user config was not preserved:\n%s", got)
+	}
+
+	result, err = manager.InitShell("zsh")
+	if err != nil {
+		t.Fatalf("second InitShell() error = %v", err)
+	}
+	if result.Changed {
+		t.Fatal("second InitShell() should be idempotent")
+	}
+}
+
+func TestInitShellBash(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	result, err := manager.InitShell("bash")
+	if err != nil {
+		t.Fatalf("InitShell(bash) error = %v", err)
+	}
+	if result.Path != filepath.Join(manager.cfg.Home, ".bashrc") {
+		t.Fatalf("InitShell(bash).Path = %q", result.Path)
 	}
 }
 

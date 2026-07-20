@@ -4,12 +4,15 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rybalka1/gosdkctl/internal/config"
@@ -35,6 +38,18 @@ type ShellEnv struct {
 	GOPATH string
 	PATH   string
 }
+
+type ShellInitResult struct {
+	Shell   string
+	Path    string
+	Changed bool
+}
+
+const (
+	managedBlockStart = "# >>> gosdkctl init >>>"
+	managedBlockEnd   = "# <<< gosdkctl init <<<"
+	versionFileLimit  = 1 << 20
+)
 
 func NewManager(cfg config.Config) *Manager {
 	return &Manager{cfg: cfg}
@@ -153,7 +168,7 @@ func (m *Manager) InstallArchive(ctx context.Context, archivePath string) (Insta
 	if extractedName != name {
 		return InstalledVersion{}, false, fmt.Errorf("archive version changed while extracting: %s -> %s", name, extractedName)
 	}
-	if err := os.Rename(extracted, dest); err != nil {
+	if err := moveDir(extracted, dest); err != nil {
 		return InstalledVersion{}, false, fmt.Errorf("move sdk into place: %w", err)
 	}
 
@@ -177,7 +192,7 @@ func (m *Manager) MigrateLocal() (MigrationResult, error) {
 	if _, err := os.Stat(dest); err == nil {
 		result.AlreadyMigrated = true
 	} else if os.IsNotExist(err) {
-		if err := os.Rename(m.cfg.LocalGoDir, dest); err != nil {
+		if err := moveDir(m.cfg.LocalGoDir, dest); err != nil {
 			return MigrationResult{}, fmt.Errorf("move ~/.local/go into sdk dir: %w", err)
 		}
 	} else {
@@ -268,6 +283,27 @@ func (m *Manager) Env(target string) (ShellEnv, error) {
 	return ShellEnv{GOROOT: selected.Path, GOPATH: m.goPath(), PATH: buildPath(selected.Path, m.goPath(), m.cfg.SDKDir)}, nil
 }
 
+func (m *Manager) InitShell(shell string) (ShellInitResult, error) {
+	shell = strings.ToLower(strings.TrimSpace(shell))
+	if shell == "" || shell == "auto" {
+		shell = detectShell()
+	}
+
+	path, err := m.shellConfigPath(shell)
+	if err != nil {
+		return ShellInitResult{}, err
+	}
+	block, err := m.shellBlock(shell)
+	if err != nil {
+		return ShellInitResult{}, err
+	}
+	changed, err := upsertManagedBlock(path, block)
+	if err != nil {
+		return ShellInitResult{}, err
+	}
+	return ShellInitResult{Shell: shell, Path: path, Changed: changed}, nil
+}
+
 func (m *Manager) setDefaultLink(target string) error {
 	if err := os.MkdirAll(m.cfg.SDKDir, 0o755); err != nil {
 		return fmt.Errorf("create sdk dir: %w", err)
@@ -278,7 +314,7 @@ func (m *Manager) setDefaultLink(target string) error {
 		return fmt.Errorf("inspect default symlink: %w", err)
 	}
 
-	linkTmp := filepath.Join(m.cfg.SDKDir, fmt.Sprintf(".go-current-%d", time.Now().UnixNano()))
+	linkTmp := filepath.Join(m.cfg.SDKDir, fmt.Sprintf(".go-current-%d-%d", time.Now().UnixNano(), os.Getpid()))
 	if err := os.Symlink(target, linkTmp); err != nil {
 		return fmt.Errorf("create default symlink: %w", err)
 	}
@@ -294,6 +330,140 @@ func (m *Manager) goPath() string {
 		return value
 	}
 	return filepath.Join(m.cfg.Home, "go")
+}
+
+func (m *Manager) shellConfigPath(shell string) (string, error) {
+	switch shell {
+	case "zsh":
+		return filepath.Join(m.cfg.Home, ".zshrc"), nil
+	case "bash":
+		return filepath.Join(m.cfg.Home, ".bashrc"), nil
+	default:
+		return "", fmt.Errorf("unsupported shell %q; use zsh or bash", shell)
+	}
+}
+
+func (m *Manager) shellBlock(shell string) (string, error) {
+	switch shell {
+	case "zsh", "bash":
+		return strings.Join([]string{
+			managedBlockStart,
+			"# Managed by gosdkctl. Re-run `gosdkctl init " + shell + "` to rewrite this block.",
+			"export GOPATH=\"${GOPATH:-$HOME/go}\"",
+			"if [[ -z \"${GOROOT:-}\" && -L \"$HOME/sdk/go-current\" && -x \"$HOME/sdk/go-current/bin/go\" ]]; then",
+			"  export GOROOT=\"$HOME/sdk/go-current\"",
+			"fi",
+			"gosdkctl_prepend_path() {",
+			"  case \":$PATH:\" in",
+			"    *:\"$1\":*) ;;",
+			"    *) export PATH=\"$1:$PATH\" ;;",
+			"  esac",
+			"}",
+			"[[ -n \"${GOROOT:-}\" ]] && gosdkctl_prepend_path \"$GOROOT/bin\"",
+			"gosdkctl_prepend_path \"$GOPATH/bin\"",
+			"gosdkctl_prepend_path \"$HOME/.local/bin\"",
+			"unset -f gosdkctl_prepend_path",
+			"usego() {",
+			"  eval \"$(gosdkctl env \"${1:-default}\")\"",
+			"}",
+			"gosetdefault() {",
+			"  gosdkctl switch \"$1\"",
+			"  usego default",
+			"}",
+			"gocurrent() {",
+			"  gosdkctl current",
+			"  command -v go",
+			"  go version",
+			"}",
+			managedBlockEnd,
+			"",
+		}, "\n"), nil
+	default:
+		return "", fmt.Errorf("unsupported shell %q; use zsh or bash", shell)
+	}
+}
+
+func detectShell() string {
+	name := filepath.Base(os.Getenv("SHELL"))
+	switch name {
+	case "zsh", "bash":
+		return name
+	default:
+		return "zsh"
+	}
+}
+
+func upsertManagedBlock(path, block string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read shell config: %w", err)
+	}
+	current := string(data)
+	next, err := replaceManagedBlock(current, block)
+	if err != nil {
+		return false, err
+	}
+	if next == current {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("create shell config parent: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+		return false, fmt.Errorf("write shell config: %w", err)
+	}
+	return true, nil
+}
+
+func replaceManagedBlock(current, block string) (string, error) {
+	start := strings.Index(current, managedBlockStart)
+	end := strings.Index(current, managedBlockEnd)
+	if start == -1 && end == -1 {
+		current = removeLegacyFunctionBlocks(current)
+		if current == "" {
+			return block, nil
+		}
+		return block + "\n" + strings.TrimLeft(current, "\r\n"), nil
+	}
+	if start == -1 || end == -1 || end < start {
+		return "", fmt.Errorf("shell config contains an incomplete gosdkctl managed block")
+	}
+	end += len(managedBlockEnd)
+	for end < len(current) && (current[end] == '\n' || current[end] == '\r') {
+		end++
+	}
+	withoutBlock := strings.TrimLeft(removeLegacyFunctionBlocks(current[:start]+current[end:]), "\r\n")
+	if withoutBlock == "" {
+		return block, nil
+	}
+	return block + "\n" + withoutBlock, nil
+}
+
+func removeLegacyFunctionBlocks(current string) string {
+	lines := strings.SplitAfter(current, "\n")
+	var out strings.Builder
+	for i := 0; i < len(lines); i++ {
+		if !isManagedFunctionStart(lines[i]) {
+			out.WriteString(lines[i])
+			continue
+		}
+		depth := strings.Count(lines[i], "{") - strings.Count(lines[i], "}")
+		for i+1 < len(lines) && depth > 0 {
+			i++
+			depth += strings.Count(lines[i], "{") - strings.Count(lines[i], "}")
+		}
+		for i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == "" {
+			i++
+		}
+	}
+	return out.String()
+}
+
+func isManagedFunctionStart(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "usego()") ||
+		strings.HasPrefix(trimmed, "gosetdefault()") ||
+		strings.HasPrefix(trimmed, "gocurrent()")
 }
 
 func readArchiveSDKName(ctx context.Context, archivePath string) (string, error) {
@@ -321,9 +491,12 @@ func readArchiveSDKName(ctx context.Context, archivePath string) (string, error)
 		if !ok || name != "go/VERSION" {
 			continue
 		}
-		data, err := io.ReadAll(tr)
+		data, err := io.ReadAll(io.LimitReader(tr, versionFileLimit+1))
 		if err != nil {
 			return "", fmt.Errorf("read Go VERSION from archive: %w", err)
+		}
+		if len(data) > versionFileLimit {
+			return "", fmt.Errorf("Go VERSION file in archive is too large")
 		}
 		fields := strings.Fields(string(data))
 		if len(fields) == 0 || !version.IsGoVersionDir(fields[0]) {
@@ -365,7 +538,7 @@ func extractGoArchive(ctx context.Context, archivePath, dest string) error {
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := ensureNoSymlinkInPath(dest, filepath.Dir(target)); err != nil {
+			if err := ensureNoSymlinkInPath(dest, target); err != nil {
 				return err
 			}
 			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
@@ -584,4 +757,80 @@ func findInPath(name string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%s not found", name)
+}
+
+func moveDir(source, dest string) error {
+	if err := os.Rename(source, dest); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := copyDir(source, dest); err != nil {
+		_ = os.RemoveAll(dest)
+		return err
+	}
+	if err := os.RemoveAll(source); err != nil {
+		return fmt.Errorf("remove copied source: %w", err)
+	}
+	return nil
+}
+
+func copyDir(source, dest string) error {
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return fmt.Errorf("resolve copied path: %w", err)
+		}
+		target := filepath.Join(dest, rel)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect copied path: %w", err)
+		}
+		mode := info.Mode()
+		switch {
+		case mode.IsDir():
+			return os.MkdirAll(target, mode.Perm())
+		case mode&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("read symlink: %w", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("create symlink parent: %w", err)
+			}
+			return os.Symlink(link, target)
+		case mode.IsRegular():
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("create file parent: %w", err)
+			}
+			return copyFile(path, target, mode.Perm())
+		default:
+			return nil
+		}
+	})
+}
+
+func copyFile(source, dest string, mode os.FileMode) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open source file: %w", err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create destination file: %w", err)
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return fmt.Errorf("copy file: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close destination file: %w", closeErr)
+	}
+	return nil
 }

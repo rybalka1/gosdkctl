@@ -55,6 +55,12 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return c.install(ctx, args[1])
 	case "migrate-local":
 		return c.migrateLocal()
+	case "init":
+		shell := "auto"
+		if len(args) > 1 {
+			shell = args[1]
+		}
+		return c.initShell(shell)
 	case "doctor":
 		return c.doctor()
 	case "env":
@@ -184,6 +190,19 @@ func (c *Command) migrateLocal() error {
 	return nil
 }
 
+func (c *Command) initShell(shell string) error {
+	result, err := c.manager.InitShell(shell)
+	if err != nil {
+		return err
+	}
+	if result.Changed {
+		fmt.Fprintf(c.stdout, "updated %s config: %s\n", result.Shell, result.Path)
+	} else {
+		fmt.Fprintf(c.stdout, "%s config already up to date: %s\n", result.Shell, result.Path)
+	}
+	return nil
+}
+
 func (c *Command) doctor() error {
 	report, err := c.manager.Doctor()
 	if err != nil {
@@ -212,6 +231,7 @@ func (c *Command) help() {
 	fmt.Fprintln(c.stdout, "  gosdkctl switch <version>")
 	fmt.Fprintln(c.stdout, "  gosdkctl install <archive>")
 	fmt.Fprintln(c.stdout, "  gosdkctl migrate-local")
+	fmt.Fprintln(c.stdout, "  gosdkctl init [zsh|bash]")
 	fmt.Fprintln(c.stdout, "  gosdkctl choose")
 	fmt.Fprintln(c.stdout, "  gosdkctl doctor")
 	fmt.Fprintln(c.stdout, "  gosdkctl env [version|path|default]")
