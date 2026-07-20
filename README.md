@@ -22,7 +22,7 @@ gosdkctl list
 gosdkctl current
 gosdkctl install <archive.tar.gz|goX.Y.Z|latest>
 gosdkctl migrate-local
-gosdkctl init [zsh|bash]
+gosdkctl init [zsh|bash|auto]
 gosdkctl self install
 gosdkctl switch <goX.Y.Z>
 gosdkctl switch
@@ -91,6 +91,8 @@ gosdkctl init bash
 Команда полностью переписывает только блок между маркерами `# >>> gosdkctl init >>>` и `# <<< gosdkctl init <<<` в `~/.zshrc` или `~/.bashrc`. Остальной пользовательский конфиг не меняется.
 
 После этого в новых shell-сессиях доступны `go`, `gosdkctl`, `go-sdk`, `usego`, `gosetdefault` и `gocurrent`.
+
+Managed block выбирает `GOROOT` по каскаду: сначала `~/sdk/go-current`, затем legacy `~/.local/go`, затем самая новая версия `goX.Y.Z` из `~/sdk`.
 
 Бинарник не может напрямую изменить уже запущенную родительскую оболочку, поэтому `gosdkctl env` также умеет выводить команды экспорта:
 

@@ -20,7 +20,7 @@ func TestRunHelp(t *testing.T) {
 	if err := command.Run(context.Background(), []string{"-help"}); err != nil {
 		t.Fatalf("Run(-help) error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "gosdkctl migrate-local") || !strings.Contains(stdout.String(), "gosdkctl init [zsh|bash]") {
+	if !strings.Contains(stdout.String(), "gosdkctl migrate-local") || !strings.Contains(stdout.String(), "gosdkctl init [zsh|bash|auto]") {
 		t.Fatalf("help output does not include expected commands:\n%s", stdout.String())
 	}
 }
@@ -77,6 +77,19 @@ func TestRunInit(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(manager.Home, ".zshrc")); err != nil {
 		t.Fatalf(".zshrc was not created: %v", err)
+	}
+}
+
+func TestRunInstallMissingPathLikeArchive(t *testing.T) {
+	t.Parallel()
+
+	command, _, _, _ := newTestCommand(t, "")
+	err := command.Run(context.Background(), []string{"install", "./missing.tar.gz"})
+	if err == nil {
+		t.Fatal("Run(install ./missing.tar.gz) succeeded")
+	}
+	if !strings.Contains(err.Error(), "archive ./missing.tar.gz does not exist") {
+		t.Fatalf("Run(install ./missing.tar.gz) error = %v", err)
 	}
 }
 

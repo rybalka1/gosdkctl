@@ -107,7 +107,10 @@ func TestInstallDownloadLatest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/dl/":
-			fmt.Fprintf(w, `[{"version":"go1.30.0","stable":true,"files":[{"filename":%q,"os":%q,"arch":%q,"version":"go1.30.0","sha256":%q,"kind":"archive"}]}]`, filename, runtime.GOOS, runtime.GOARCH, hex.EncodeToString(sum[:]))
+			fmt.Fprintf(w, `[
+				{"version":"go1.29.0","stable":true,"files":[{"filename":"old.tar.gz","os":%q,"arch":%q,"version":"go1.29.0","sha256":"old","kind":"archive"}]},
+				{"version":"go1.30.0","stable":true,"files":[{"filename":%q,"os":%q,"arch":%q,"version":"go1.30.0","sha256":%q,"kind":"archive"}]}
+			]`, runtime.GOOS, runtime.GOARCH, filename, runtime.GOOS, runtime.GOARCH, hex.EncodeToString(sum[:]))
 		case "/dl/" + filename:
 			_, _ = w.Write(archiveData)
 		default:
@@ -125,6 +128,43 @@ func TestInstallDownloadLatest(t *testing.T) {
 	}
 	if result.Version.Name != "go1.30.0" || result.File != filename {
 		t.Fatalf("InstallDownload() = %+v", result)
+	}
+}
+
+func TestInstallDownloadSpecificVersion(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	archivePath := filepath.Join(t.TempDir(), "go1.29.0.tar.gz")
+	writeArchive(t, archivePath, "go1.29.0")
+	archiveData, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	sum := sha256.Sum256(archiveData)
+	filename := fmt.Sprintf("go1.29.0.%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dl/":
+			fmt.Fprintf(w, `[{"version":"go1.29.0","stable":true,"files":[{"filename":%q,"os":%q,"arch":%q,"version":"go1.29.0","sha256":%q,"kind":"archive"}]}]`, filename, runtime.GOOS, runtime.GOARCH, hex.EncodeToString(sum[:]))
+		case "/dl/" + filename:
+			_, _ = w.Write(archiveData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	manager.goDownloadAPI = server.URL + "/dl/?mode=json&include=all"
+	manager.goDownloadBase = server.URL + "/dl/"
+
+	result, err := manager.InstallDownload(context.Background(), "go1.29.0")
+	if err != nil {
+		t.Fatalf("InstallDownload(go1.29.0) error = %v", err)
+	}
+	if result.Version.Name != "go1.29.0" || result.File != filename {
+		t.Fatalf("InstallDownload(go1.29.0) = %+v", result)
 	}
 }
 
@@ -153,10 +193,25 @@ func TestInstallDownloadRejectsBadChecksum(t *testing.T) {
 	}
 }
 
-func TestSelfInstall(t *testing.T) {
+func TestInstallDownloadRejectsLargeMetadata(t *testing.T) {
 	t.Parallel()
 
 	manager := newTestManager(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", metadataLimit+1)))
+	}))
+	defer server.Close()
+
+	manager.goDownloadAPI = server.URL
+
+	if _, err := manager.InstallDownload(context.Background(), "latest"); err == nil {
+		t.Fatal("InstallDownload() accepted oversized metadata")
+	}
+}
+
+func TestSelfInstall(t *testing.T) {
+	manager := newTestManager(t)
+	t.Setenv("PATH", filepath.Join(manager.cfg.Home, ".local", "bin"))
 	source := filepath.Join(t.TempDir(), "gosdkctl-source")
 	if err := os.WriteFile(source, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -175,6 +230,9 @@ func TestSelfInstall(t *testing.T) {
 	}
 	if target != result.BinaryPath {
 		t.Fatalf("alias target = %q, want %q", target, result.BinaryPath)
+	}
+	if !result.OnPath {
+		t.Fatal("SelfInstall() did not report ~/.local/bin on PATH")
 	}
 
 	if err := os.WriteFile(result.BinaryPath, []byte("old"), 0o755); err != nil {
@@ -355,6 +413,8 @@ func TestInitShellWritesAndReplacesManagedBlock(t *testing.T) {
 		"old",
 		managedBlockEnd,
 		"usego() {",
+		"  echo \"}\"",
+		"  # { comment }",
 		"  echo old",
 		"}",
 		"",
@@ -389,6 +449,9 @@ func TestInitShellWritesAndReplacesManagedBlock(t *testing.T) {
 	if !strings.Contains(got, `eval "$(gosdkctl env "${1:-default}")"`) {
 		t.Fatalf("managed block does not contain usego helper:\n%s", got)
 	}
+	if !strings.Contains(got, "$HOME/.local/go") || !strings.Contains(got, "find \"$HOME/sdk\"") {
+		t.Fatalf("managed block does not contain Go fallback logic:\n%s", got)
+	}
 	if !strings.Contains(got, "alias ll='ls -la'") {
 		t.Fatalf("user config was not preserved:\n%s", got)
 	}
@@ -399,6 +462,20 @@ func TestInitShellWritesAndReplacesManagedBlock(t *testing.T) {
 	}
 	if result.Changed {
 		t.Fatal("second InitShell() should be idempotent")
+	}
+}
+
+func TestInitShellRejectsIncompleteManagedBlock(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	zshrc := filepath.Join(manager.cfg.Home, ".zshrc")
+	if err := os.WriteFile(zshrc, []byte(managedBlockStart+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := manager.InitShell("zsh"); err == nil {
+		t.Fatal("InitShell() accepted incomplete managed block")
 	}
 }
 

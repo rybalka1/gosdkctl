@@ -169,8 +169,13 @@ func (c *Command) choose() error {
 }
 
 func (c *Command) install(ctx context.Context, archive string) error {
-	if strings.HasSuffix(archive, ".tar.gz") || strings.ContainsRune(archive, os.PathSeparator) {
+	if info, err := os.Stat(archive); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("%s is a directory, expected Go archive file", archive)
+		}
 		return c.installArchive(ctx, archive)
+	} else if strings.ContainsRune(archive, os.PathSeparator) || strings.HasSuffix(archive, ".tar.gz") {
+		return fmt.Errorf("archive %s does not exist", archive)
 	}
 	result, err := c.manager.InstallDownload(ctx, archive)
 	if err != nil {
@@ -206,6 +211,9 @@ func (c *Command) selfInstall() error {
 	}
 	fmt.Fprintf(c.stdout, "installed gosdkctl -> %s\n", result.BinaryPath)
 	fmt.Fprintf(c.stdout, "go-sdk -> %s\n", result.AliasPath)
+	if !result.OnPath {
+		fmt.Fprintf(c.stderr, "warning: %s is not in PATH for this shell; run `gosdkctl init zsh` or `gosdkctl init bash`\n", result.BinDir)
+	}
 	return nil
 }
 
@@ -264,7 +272,7 @@ func (c *Command) help() {
 	fmt.Fprintln(c.stdout, "  gosdkctl switch <version>")
 	fmt.Fprintln(c.stdout, "  gosdkctl install <archive|version|latest>")
 	fmt.Fprintln(c.stdout, "  gosdkctl migrate-local")
-	fmt.Fprintln(c.stdout, "  gosdkctl init [zsh|bash]")
+	fmt.Fprintln(c.stdout, "  gosdkctl init [zsh|bash|auto]")
 	fmt.Fprintln(c.stdout, "  gosdkctl self install")
 	fmt.Fprintln(c.stdout, "  gosdkctl choose")
 	fmt.Fprintln(c.stdout, "  gosdkctl doctor")

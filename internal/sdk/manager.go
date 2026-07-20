@@ -63,12 +63,15 @@ type DownloadInstallResult struct {
 type SelfInstallResult struct {
 	BinaryPath string
 	AliasPath  string
+	BinDir     string
+	OnPath     bool
 }
 
 const (
 	managedBlockStart = "# >>> gosdkctl init >>>"
 	managedBlockEnd   = "# <<< gosdkctl init <<<"
 	versionFileLimit  = 1 << 20
+	metadataLimit     = 10 << 20
 )
 
 func NewManager(cfg config.Config) *Manager {
@@ -287,7 +290,12 @@ func (m *Manager) SelfInstall(source string) (SelfInstallResult, error) {
 	if err := replaceSymlink(alias, target); err != nil {
 		return SelfInstallResult{}, err
 	}
-	return SelfInstallResult{BinaryPath: target, AliasPath: alias}, nil
+	return SelfInstallResult{
+		BinaryPath: target,
+		AliasPath:  alias,
+		BinDir:     localBin,
+		OnPath:     containsPath(filepath.SplitList(os.Getenv("PATH")), localBin),
+	}, nil
 }
 
 func (m *Manager) MigrateLocal() (MigrationResult, error) {
@@ -487,9 +495,11 @@ func (m *Manager) resolveDownload(ctx context.Context, selector string) (goFileM
 	var selected *goRelease
 	if selector == "latest" {
 		for i := range releases {
-			if releases[i].Stable {
+			if !releases[i].Stable {
+				continue
+			}
+			if selected == nil || version.Compare(releases[i].Version, selected.Version) > 0 {
 				selected = &releases[i]
-				break
 			}
 		}
 	} else {
@@ -527,8 +537,15 @@ func (m *Manager) fetchReleases(ctx context.Context) ([]goRelease, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch Go download metadata: unexpected status %s", resp.Status)
 	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, metadataLimit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read Go download metadata: %w", err)
+	}
+	if len(data) > metadataLimit {
+		return nil, fmt.Errorf("Go download metadata is too large")
+	}
 	var releases []goRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 10<<20)).Decode(&releases); err != nil {
+	if err := json.Unmarshal(data, &releases); err != nil {
 		return nil, fmt.Errorf("decode Go download metadata: %w", err)
 	}
 	if len(releases) == 0 {
@@ -550,17 +567,7 @@ func (m *Manager) httpGet(ctx context.Context, url string) (*http.Response, erro
 }
 
 func goPlatform() (string, string, error) {
-	switch runtime.GOOS {
-	case "linux", "darwin", "windows", "freebsd":
-	default:
-		return "", "", fmt.Errorf("unsupported GOOS %q", runtime.GOOS)
-	}
-	switch runtime.GOARCH {
-	case "amd64", "arm64", "386", "arm":
-		return runtime.GOOS, runtime.GOARCH, nil
-	default:
-		return "", "", fmt.Errorf("unsupported GOARCH %q", runtime.GOARCH)
-	}
+	return runtime.GOOS, runtime.GOARCH, nil
 }
 
 func (m *Manager) shellBlock(shell string) (string, error) {
@@ -570,8 +577,18 @@ func (m *Manager) shellBlock(shell string) (string, error) {
 			managedBlockStart,
 			"# Managed by gosdkctl. Re-run `gosdkctl init " + shell + "` to rewrite this block.",
 			"export GOPATH=\"${GOPATH:-$HOME/go}\"",
-			"if [[ -z \"${GOROOT:-}\" && -L \"$HOME/sdk/go-current\" && -x \"$HOME/sdk/go-current/bin/go\" ]]; then",
-			"  export GOROOT=\"$HOME/sdk/go-current\"",
+			"if [[ -z \"${GOROOT:-}\" ]]; then",
+			"  if [[ -L \"$HOME/sdk/go-current\" && -x \"$HOME/sdk/go-current/bin/go\" ]]; then",
+			"    export GOROOT=\"$HOME/sdk/go-current\"",
+			"  elif [[ -x \"$HOME/.local/go/bin/go\" ]]; then",
+			"    export GOROOT=\"$HOME/.local/go\"",
+			"  else",
+			"    gosdkctl_latest_go_sdk=$(command find \"$HOME/sdk\" -maxdepth 1 -mindepth 1 -type d -name 'go[0-9]*' -exec basename {} \\; 2>/dev/null | sort -V 2>/dev/null | tail -n 1)",
+			"    if [[ -n \"$gosdkctl_latest_go_sdk\" && -x \"$HOME/sdk/$gosdkctl_latest_go_sdk/bin/go\" ]]; then",
+			"      export GOROOT=\"$HOME/sdk/$gosdkctl_latest_go_sdk\"",
+			"    fi",
+			"    unset gosdkctl_latest_go_sdk",
+			"  fi",
 			"fi",
 			"gosdkctl_prepend_path() {",
 			"  case \":$PATH:\" in",
@@ -667,10 +684,11 @@ func removeLegacyFunctionBlocks(current string) string {
 			out.WriteString(lines[i])
 			continue
 		}
-		depth := strings.Count(lines[i], "{") - strings.Count(lines[i], "}")
-		for i+1 < len(lines) && depth > 0 {
+		for i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "}" {
 			i++
-			depth += strings.Count(lines[i], "{") - strings.Count(lines[i], "}")
+		}
+		if i+1 < len(lines) {
+			i++
 		}
 		for i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == "" {
 			i++
@@ -681,9 +699,9 @@ func removeLegacyFunctionBlocks(current string) string {
 
 func isManagedFunctionStart(line string) bool {
 	trimmed := strings.TrimSpace(line)
-	return strings.HasPrefix(trimmed, "usego()") ||
-		strings.HasPrefix(trimmed, "gosetdefault()") ||
-		strings.HasPrefix(trimmed, "gocurrent()")
+	return trimmed == "usego() {" ||
+		trimmed == "gosetdefault() {" ||
+		trimmed == "gocurrent() {"
 }
 
 func readArchiveSDKName(ctx context.Context, archivePath string) (string, error) {
@@ -1060,14 +1078,16 @@ func replaceSymlink(linkPath, target string) error {
 		if info.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("%s exists and is not a symlink", linkPath)
 		}
-		if err := os.Remove(linkPath); err != nil {
-			return fmt.Errorf("replace symlink: %w", err)
-		}
 	} else if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("inspect symlink: %w", err)
 	}
-	if err := os.Symlink(target, linkPath); err != nil {
+	tmp := filepath.Join(filepath.Dir(linkPath), fmt.Sprintf(".%s-%d-%d", filepath.Base(linkPath), time.Now().UnixNano(), os.Getpid()))
+	if err := os.Symlink(target, tmp); err != nil {
 		return fmt.Errorf("create symlink: %w", err)
+	}
+	if err := os.Rename(tmp, linkPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace symlink: %w", err)
 	}
 	return nil
 }
