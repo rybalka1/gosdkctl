@@ -4,6 +4,33 @@
 
 Рабочий процесс намеренно похож на инструменты вроде `uv`: один небольшой бинарник отвечает за установку, обнаружение, переключение и диагностику локальной среды разработчика.
 
+## Быстрый старт Linux x86_64
+
+На чистой Linux x86_64-системе Go вручную ставить не нужно. Скачайте готовый бинарник из первого релиза:
+
+```bash
+curl -L -o gosdkctl https://github.com/rybalka1/gosdkctl/releases/download/v1.0.0/gosdkctl-linux-amd64
+chmod +x gosdkctl
+./gosdkctl self install
+~/.local/bin/gosdkctl init zsh
+~/.local/bin/gosdkctl install latest
+exec zsh
+```
+
+Для bash замените `init zsh` и `exec zsh`:
+
+```bash
+~/.local/bin/gosdkctl init bash
+exec bash
+```
+
+После этого доступны:
+
+```bash
+gosdkctl current
+go version
+```
+
 ## Структура каталогов
 
 ```text
@@ -131,6 +158,8 @@ gosdkctl doctor
 
 ## Сборка
 
+Сборка из исходников нужна только для разработки самого `gosdkctl`. Для bootstrap чистой машины используйте готовый бинарник из GitHub Releases.
+
 ```bash
 go build -o ~/.local/bin/gosdkctl ./cmd/gosdkctl
 ```
@@ -147,7 +176,7 @@ gosdkctl self install
 
 ## Bootstrap на чистой системе
 
-Минимальный сценарий после получения первого бинарника:
+Минимальный сценарий после получения первого бинарника из GitHub Releases:
 
 ```bash
 ./gosdkctl self install
