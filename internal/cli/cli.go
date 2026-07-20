@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -50,9 +51,14 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 		return c.choose()
 	case "install":
 		if len(args) != 2 {
-			return fmt.Errorf("usage: gosdkctl install <archive.tar.gz>")
+			return fmt.Errorf("usage: gosdkctl install <archive.tar.gz|version|latest>")
 		}
 		return c.install(ctx, args[1])
+	case "self":
+		if len(args) != 2 || args[1] != "install" {
+			return fmt.Errorf("usage: gosdkctl self install")
+		}
+		return c.selfInstall()
 	case "migrate-local":
 		return c.migrateLocal()
 	case "init":
@@ -163,6 +169,23 @@ func (c *Command) choose() error {
 }
 
 func (c *Command) install(ctx context.Context, archive string) error {
+	if strings.HasSuffix(archive, ".tar.gz") || strings.ContainsRune(archive, os.PathSeparator) {
+		return c.installArchive(ctx, archive)
+	}
+	result, err := c.manager.InstallDownload(ctx, archive)
+	if err != nil {
+		return err
+	}
+	if result.Existed {
+		fmt.Fprintf(c.stdout, "%s already exists\n", result.Version.Name)
+	} else {
+		fmt.Fprintf(c.stdout, "installed %s from %s\n", result.Version.Name, result.File)
+	}
+	fmt.Fprintf(c.stdout, "go-current -> %s\n", result.Version.Path)
+	return nil
+}
+
+func (c *Command) installArchive(ctx context.Context, archive string) error {
 	installed, existed, err := c.manager.InstallArchive(ctx, archive)
 	if err != nil {
 		return err
@@ -173,6 +196,16 @@ func (c *Command) install(ctx context.Context, archive string) error {
 		fmt.Fprintf(c.stdout, "installed %s\n", installed.Name)
 	}
 	fmt.Fprintf(c.stdout, "go-current -> %s\n", installed.Path)
+	return nil
+}
+
+func (c *Command) selfInstall() error {
+	result, err := c.manager.SelfInstall("")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.stdout, "installed gosdkctl -> %s\n", result.BinaryPath)
+	fmt.Fprintf(c.stdout, "go-sdk -> %s\n", result.AliasPath)
 	return nil
 }
 
@@ -229,9 +262,10 @@ func (c *Command) help() {
 	fmt.Fprintln(c.stdout, "  gosdkctl list")
 	fmt.Fprintln(c.stdout, "  gosdkctl current")
 	fmt.Fprintln(c.stdout, "  gosdkctl switch <version>")
-	fmt.Fprintln(c.stdout, "  gosdkctl install <archive>")
+	fmt.Fprintln(c.stdout, "  gosdkctl install <archive|version|latest>")
 	fmt.Fprintln(c.stdout, "  gosdkctl migrate-local")
 	fmt.Fprintln(c.stdout, "  gosdkctl init [zsh|bash]")
+	fmt.Fprintln(c.stdout, "  gosdkctl self install")
 	fmt.Fprintln(c.stdout, "  gosdkctl choose")
 	fmt.Fprintln(c.stdout, "  gosdkctl doctor")
 	fmt.Fprintln(c.stdout, "  gosdkctl env [version|path|default]")

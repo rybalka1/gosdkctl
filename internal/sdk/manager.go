@@ -4,12 +4,17 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -20,7 +25,11 @@ import (
 )
 
 type Manager struct {
-	cfg config.Config
+	cfg             config.Config
+	httpClient      *http.Client
+	goDownloadAPI   string
+	goDownloadBase  string
+	selfInstallName string
 }
 
 type InstalledVersion struct {
@@ -45,6 +54,17 @@ type ShellInitResult struct {
 	Changed bool
 }
 
+type DownloadInstallResult struct {
+	Version InstalledVersion
+	Existed bool
+	File    string
+}
+
+type SelfInstallResult struct {
+	BinaryPath string
+	AliasPath  string
+}
+
 const (
 	managedBlockStart = "# >>> gosdkctl init >>>"
 	managedBlockEnd   = "# <<< gosdkctl init <<<"
@@ -52,7 +72,13 @@ const (
 )
 
 func NewManager(cfg config.Config) *Manager {
-	return &Manager{cfg: cfg}
+	return &Manager{
+		cfg:             cfg,
+		httpClient:      http.DefaultClient,
+		goDownloadAPI:   "https://go.dev/dl/?mode=json&include=all",
+		goDownloadBase:  "https://go.dev/dl/",
+		selfInstallName: "gosdkctl",
+	}
 }
 
 func (m *Manager) List() ([]string, error) {
@@ -176,6 +202,92 @@ func (m *Manager) InstallArchive(ctx context.Context, archivePath string) (Insta
 		return InstalledVersion{}, false, err
 	}
 	return InstalledVersion{Name: name, Path: dest}, false, nil
+}
+
+func (m *Manager) InstallDownload(ctx context.Context, selector string) (DownloadInstallResult, error) {
+	file, err := m.resolveDownload(ctx, selector)
+	if err != nil {
+		return DownloadInstallResult{}, err
+	}
+	if err := os.MkdirAll(m.cfg.SDKDir, 0o755); err != nil {
+		return DownloadInstallResult{}, fmt.Errorf("create sdk dir: %w", err)
+	}
+
+	archive, err := os.CreateTemp(m.cfg.SDKDir, ".gosdkctl-download-*.tar.gz")
+	if err != nil {
+		return DownloadInstallResult{}, fmt.Errorf("create download file: %w", err)
+	}
+	archivePath := archive.Name()
+	defer os.Remove(archivePath)
+
+	hash := sha256.New()
+	resp, err := m.httpGet(ctx, m.goDownloadBase+file.Filename)
+	if err != nil {
+		_ = archive.Close()
+		return DownloadInstallResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = archive.Close()
+		return DownloadInstallResult{}, fmt.Errorf("download %s: unexpected status %s", file.Filename, resp.Status)
+	}
+	if _, err := io.Copy(io.MultiWriter(archive, hash), resp.Body); err != nil {
+		_ = archive.Close()
+		return DownloadInstallResult{}, fmt.Errorf("download %s: %w", file.Filename, err)
+	}
+	if err := archive.Close(); err != nil {
+		return DownloadInstallResult{}, fmt.Errorf("close downloaded archive: %w", err)
+	}
+	gotHash := hex.EncodeToString(hash.Sum(nil))
+	if !strings.EqualFold(gotHash, file.SHA256) {
+		return DownloadInstallResult{}, fmt.Errorf("sha256 mismatch for %s: got %s, want %s", file.Filename, gotHash, file.SHA256)
+	}
+
+	installed, existed, err := m.InstallArchive(ctx, archivePath)
+	if err != nil {
+		return DownloadInstallResult{}, err
+	}
+	return DownloadInstallResult{Version: installed, Existed: existed, File: file.Filename}, nil
+}
+
+func (m *Manager) SelfInstall(source string) (SelfInstallResult, error) {
+	if source == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return SelfInstallResult{}, fmt.Errorf("resolve current executable: %w", err)
+		}
+		source = exe
+	}
+	localBin := filepath.Join(m.cfg.Home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		return SelfInstallResult{}, fmt.Errorf("create ~/.local/bin: %w", err)
+	}
+	target := filepath.Join(localBin, m.selfInstallName)
+	alias := filepath.Join(localBin, "go-sdk")
+	tmp, err := os.CreateTemp(localBin, ".gosdkctl-self-install-*")
+	if err != nil {
+		return SelfInstallResult{}, fmt.Errorf("create temporary binary: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return SelfInstallResult{}, fmt.Errorf("close temporary binary: %w", err)
+	}
+	defer os.Remove(tmpPath)
+
+	if err := copyFile(source, tmpPath, 0o755); err != nil {
+		return SelfInstallResult{}, fmt.Errorf("install binary: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		return SelfInstallResult{}, fmt.Errorf("mark binary executable: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		return SelfInstallResult{}, fmt.Errorf("replace installed binary: %w", err)
+	}
+	if err := replaceSymlink(alias, target); err != nil {
+		return SelfInstallResult{}, err
+	}
+	return SelfInstallResult{BinaryPath: target, AliasPath: alias}, nil
 }
 
 func (m *Manager) MigrateLocal() (MigrationResult, error) {
@@ -340,6 +452,114 @@ func (m *Manager) shellConfigPath(shell string) (string, error) {
 		return filepath.Join(m.cfg.Home, ".bashrc"), nil
 	default:
 		return "", fmt.Errorf("unsupported shell %q; use zsh or bash", shell)
+	}
+}
+
+type goRelease struct {
+	Version string       `json:"version"`
+	Stable  bool         `json:"stable"`
+	Files   []goFileMeta `json:"files"`
+}
+
+type goFileMeta struct {
+	Filename string `json:"filename"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Version  string `json:"version"`
+	SHA256   string `json:"sha256"`
+	Kind     string `json:"kind"`
+}
+
+func (m *Manager) resolveDownload(ctx context.Context, selector string) (goFileMeta, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		selector = "latest"
+	}
+	releases, err := m.fetchReleases(ctx)
+	if err != nil {
+		return goFileMeta{}, err
+	}
+	targetOS, targetArch, err := goPlatform()
+	if err != nil {
+		return goFileMeta{}, err
+	}
+
+	var selected *goRelease
+	if selector == "latest" {
+		for i := range releases {
+			if releases[i].Stable {
+				selected = &releases[i]
+				break
+			}
+		}
+	} else {
+		versionName := selector
+		if !strings.HasPrefix(versionName, "go") {
+			versionName = "go" + versionName
+		}
+		if !version.IsGoVersionDir(versionName) {
+			return goFileMeta{}, fmt.Errorf("invalid Go version selector %q", selector)
+		}
+		for i := range releases {
+			if releases[i].Version == versionName {
+				selected = &releases[i]
+				break
+			}
+		}
+	}
+	if selected == nil {
+		return goFileMeta{}, fmt.Errorf("Go version %q was not found in download metadata", selector)
+	}
+	for _, file := range selected.Files {
+		if file.Kind == "archive" && file.OS == targetOS && file.Arch == targetArch && file.SHA256 != "" {
+			return file, nil
+		}
+	}
+	return goFileMeta{}, fmt.Errorf("Go %s archive for %s/%s was not found", selected.Version, targetOS, targetArch)
+}
+
+func (m *Manager) fetchReleases(ctx context.Context) ([]goRelease, error) {
+	resp, err := m.httpGet(ctx, m.goDownloadAPI)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch Go download metadata: unexpected status %s", resp.Status)
+	}
+	var releases []goRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 10<<20)).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("decode Go download metadata: %w", err)
+	}
+	if len(releases) == 0 {
+		return nil, fmt.Errorf("Go download metadata is empty")
+	}
+	return releases, nil
+}
+
+func (m *Manager) httpGet(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create HTTP request: %w", err)
+	}
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	return resp, nil
+}
+
+func goPlatform() (string, string, error) {
+	switch runtime.GOOS {
+	case "linux", "darwin", "windows", "freebsd":
+	default:
+		return "", "", fmt.Errorf("unsupported GOOS %q", runtime.GOOS)
+	}
+	switch runtime.GOARCH {
+	case "amd64", "arm64", "386", "arm":
+		return runtime.GOOS, runtime.GOARCH, nil
+	default:
+		return "", "", fmt.Errorf("unsupported GOARCH %q", runtime.GOARCH)
 	}
 }
 
@@ -831,6 +1051,23 @@ func copyFile(source, dest string, mode os.FileMode) error {
 	}
 	if closeErr != nil {
 		return fmt.Errorf("close destination file: %w", closeErr)
+	}
+	return nil
+}
+
+func replaceSymlink(linkPath, target string) error {
+	if info, err := os.Lstat(linkPath); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("%s exists and is not a symlink", linkPath)
+		}
+		if err := os.Remove(linkPath); err != nil {
+			return fmt.Errorf("replace symlink: %w", err)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect symlink: %w", err)
+	}
+	if err := os.Symlink(target, linkPath); err != nil {
+		return fmt.Errorf("create symlink: %w", err)
 	}
 	return nil
 }

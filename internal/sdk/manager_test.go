@@ -4,8 +4,14 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -82,6 +88,107 @@ func TestInstallArchive(t *testing.T) {
 	}
 	if !existed || installed.Name != "go1.27.0" {
 		t.Fatalf("second install = (%+v, %v), want existing go1.27.0", installed, existed)
+	}
+}
+
+func TestInstallDownloadLatest(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	archivePath := filepath.Join(t.TempDir(), "go1.30.0.tar.gz")
+	writeArchive(t, archivePath, "go1.30.0")
+	archiveData, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	sum := sha256.Sum256(archiveData)
+	filename := fmt.Sprintf("go1.30.0.%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dl/":
+			fmt.Fprintf(w, `[{"version":"go1.30.0","stable":true,"files":[{"filename":%q,"os":%q,"arch":%q,"version":"go1.30.0","sha256":%q,"kind":"archive"}]}]`, filename, runtime.GOOS, runtime.GOARCH, hex.EncodeToString(sum[:]))
+		case "/dl/" + filename:
+			_, _ = w.Write(archiveData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	manager.goDownloadAPI = server.URL + "/dl/?mode=json&include=all"
+	manager.goDownloadBase = server.URL + "/dl/"
+
+	result, err := manager.InstallDownload(context.Background(), "latest")
+	if err != nil {
+		t.Fatalf("InstallDownload() error = %v", err)
+	}
+	if result.Version.Name != "go1.30.0" || result.File != filename {
+		t.Fatalf("InstallDownload() = %+v", result)
+	}
+}
+
+func TestInstallDownloadRejectsBadChecksum(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	filename := fmt.Sprintf("go1.30.0.%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dl/":
+			fmt.Fprintf(w, `[{"version":"go1.30.0","stable":true,"files":[{"filename":%q,"os":%q,"arch":%q,"version":"go1.30.0","sha256":"deadbeef","kind":"archive"}]}]`, filename, runtime.GOOS, runtime.GOARCH)
+		case "/dl/" + filename:
+			_, _ = w.Write([]byte("bad archive"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	manager.goDownloadAPI = server.URL + "/dl/?mode=json&include=all"
+	manager.goDownloadBase = server.URL + "/dl/"
+
+	if _, err := manager.InstallDownload(context.Background(), "latest"); err == nil {
+		t.Fatal("InstallDownload() accepted bad checksum")
+	}
+}
+
+func TestSelfInstall(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	source := filepath.Join(t.TempDir(), "gosdkctl-source")
+	if err := os.WriteFile(source, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	result, err := manager.SelfInstall(source)
+	if err != nil {
+		t.Fatalf("SelfInstall() error = %v", err)
+	}
+	if _, err := os.Stat(result.BinaryPath); err != nil {
+		t.Fatalf("installed binary missing: %v", err)
+	}
+	target, err := os.Readlink(result.AliasPath)
+	if err != nil {
+		t.Fatalf("Readlink() error = %v", err)
+	}
+	if target != result.BinaryPath {
+		t.Fatalf("alias target = %q, want %q", target, result.BinaryPath)
+	}
+
+	if err := os.WriteFile(result.BinaryPath, []byte("old"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := manager.SelfInstall(source); err != nil {
+		t.Fatalf("second SelfInstall() error = %v", err)
+	}
+	data, err := os.ReadFile(result.BinaryPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "#!/bin/sh\n" {
+		t.Fatalf("installed binary was not replaced: %q", string(data))
 	}
 }
 

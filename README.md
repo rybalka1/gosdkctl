@@ -20,9 +20,10 @@
 gosdkctl status
 gosdkctl list
 gosdkctl current
-gosdkctl install <archive.tar.gz>
+gosdkctl install <archive.tar.gz|goX.Y.Z|latest>
 gosdkctl migrate-local
 gosdkctl init [zsh|bash]
+gosdkctl self install
 gosdkctl switch <goX.Y.Z>
 gosdkctl switch
 gosdkctl choose
@@ -34,13 +35,25 @@ gosdkctl env [goX.Y.Z|path|default]
 
 ## Установка Go SDK
 
-Скачайте архив Go и установите его без root:
+Установить последнюю стабильную версию Go:
+
+```bash
+gosdkctl install latest
+```
+
+Установить конкретную версию:
+
+```bash
+gosdkctl install go1.26.1
+```
+
+Или установить заранее скачанный архив:
 
 ```bash
 gosdkctl install ~/Downloads/go1.26.1.linux-amd64.tar.gz
 ```
 
-Команда распаковывает архив в `~/sdk/go1.26.1`, проверяет `go/VERSION` и `go/bin/go`, обновляет `~/sdk/go-current`. Существующие каталоги SDK не удаляются. Повторная установка того же архива идемпотентна: существующий SDK переиспользуется и становится основным.
+Для загрузки с `go.dev` команда выбирает архив под текущие `GOOS/GOARCH` и проверяет `sha256` из официального download metadata. Затем распаковывает архив в `~/sdk/go1.26.1`, проверяет `go/VERSION` и `go/bin/go`, обновляет `~/sdk/go-current`. Существующие каталоги SDK не удаляются. Повторная установка той же версии идемпотентна: существующий SDK переиспользуется и становится основным.
 
 ## Миграция старого `~/.local/go`
 
@@ -120,10 +133,32 @@ gosdkctl doctor
 go build -o ~/.local/bin/gosdkctl ./cmd/gosdkctl
 ```
 
-Чтобы добавить команду в PATH:
+## Self install
+
+Если бинарник уже запущен из временного места, он может сам установить себя в стандартный пользовательский путь:
 
 ```bash
-mkdir -p ~/.local/bin
-go build -o ~/.local/bin/gosdkctl ./cmd/gosdkctl
-ln -sf ~/.local/bin/gosdkctl ~/.local/bin/go-sdk
+gosdkctl self install
+```
+
+Команда создает `~/.local/bin/gosdkctl` и совместимый symlink `~/.local/bin/go-sdk`.
+
+## Bootstrap на чистой системе
+
+Минимальный сценарий после получения первого бинарника:
+
+```bash
+./gosdkctl self install
+~/.local/bin/gosdkctl init zsh
+~/.local/bin/gosdkctl install latest
+exec zsh
+```
+
+Для bash:
+
+```bash
+./gosdkctl self install
+~/.local/bin/gosdkctl init bash
+~/.local/bin/gosdkctl install latest
+exec bash
 ```
