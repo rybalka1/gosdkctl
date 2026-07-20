@@ -194,3 +194,7 @@ For bash:
 ~/.local/bin/gosdkctl install latest
 exec bash
 ```
+
+## License
+
+MIT License. See [LICENSE](LICENSE).

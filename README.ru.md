@@ -195,3 +195,7 @@ exec zsh
 ~/.local/bin/gosdkctl install latest
 exec bash
 ```
+
+## Лицензия
+
+MIT License. См. [LICENSE](LICENSE).
