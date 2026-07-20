@@ -38,7 +38,7 @@ go version
   go1.24.2/
   go1.25.1/
   go1.26.0/
-  go-current -> /home/rybalka/sdk/go1.26.0
+  go-current -> $HOME/sdk/go1.26.0
 ```
 
 ## Команды
