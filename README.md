@@ -1,12 +1,14 @@
 # gosdkctl
 
-`gosdkctl` — менеджер Go SDK без root-доступа. Хранит версии Go в `~/sdk`, отслеживает SDK по умолчанию через `~/sdk/go-current` и не пишет в `/usr/local` или другие каталоги, принадлежащие root.
+[Русская версия](README.ru.md)
 
-Рабочий процесс намеренно похож на инструменты вроде `uv`: один небольшой бинарник отвечает за установку, обнаружение, переключение и диагностику локальной среды разработчика.
+`gosdkctl` is a rootless Go SDK manager. It keeps Go versions in `~/sdk`, tracks the default SDK through `~/sdk/go-current`, and never writes to `/usr/local` or other root-owned paths.
 
-## Быстрый старт Linux x86_64
+The workflow is intentionally similar to tools like `uv`: one small binary owns installation, discovery, version switching, shell integration, and diagnostics for a local developer environment.
 
-На чистой Linux x86_64-системе Go вручную ставить не нужно. Скачайте готовый бинарник из первого релиза:
+## Quick Start: Linux x86_64
+
+On a clean Linux x86_64 machine, you do not need to install Go manually. Download the release binary first:
 
 ```bash
 curl -L -o gosdkctl https://github.com/rybalka1/gosdkctl/releases/download/v1.0.0/gosdkctl-linux-amd64
@@ -17,21 +19,21 @@ chmod +x gosdkctl
 exec zsh
 ```
 
-Для bash замените `init zsh` и `exec zsh`:
+For bash, replace the shell initialization and restart commands:
 
 ```bash
 ~/.local/bin/gosdkctl init bash
 exec bash
 ```
 
-После этого доступны:
+Then verify the environment:
 
 ```bash
 gosdkctl current
 go version
 ```
 
-## Структура каталогов
+## Directory Layout
 
 ```text
 ~/sdk/
@@ -41,7 +43,7 @@ go version
   go-current -> $HOME/sdk/go1.26.0
 ```
 
-## Команды
+## Commands
 
 ```text
 gosdkctl status
@@ -58,70 +60,70 @@ gosdkctl doctor
 gosdkctl env [goX.Y.Z|path|default]
 ```
 
-`switch` без аргумента работает как `choose` и запрашивает версию из списка установленных.
+`switch` without an argument behaves like `choose` and prompts for one of the installed versions.
 
-## Установка Go SDK
+## Install a Go SDK
 
-Установить последнюю стабильную версию Go:
+Install the latest stable Go release:
 
 ```bash
 gosdkctl install latest
 ```
 
-Установить конкретную версию:
+Install a specific version:
 
 ```bash
 gosdkctl install go1.26.1
 ```
 
-Или установить заранее скачанный архив:
+Install a local archive:
 
 ```bash
 gosdkctl install ~/Downloads/go1.26.1.linux-amd64.tar.gz
 ```
 
-Для загрузки с `go.dev` команда выбирает архив под текущие `GOOS/GOARCH` и проверяет `sha256` из официального download metadata. Затем распаковывает архив в `~/sdk/go1.26.1`, проверяет `go/VERSION` и `go/bin/go`, обновляет `~/sdk/go-current`. Существующие каталоги SDK не удаляются. Повторная установка той же версии идемпотентна: существующий SDK переиспользуется и становится основным.
+When downloading from `go.dev`, `gosdkctl` selects the archive for the current `GOOS/GOARCH` and verifies its SHA256 checksum from the official download metadata. It then extracts the SDK into `~/sdk/go1.26.1`, validates `go/VERSION` and `go/bin/go`, and updates `~/sdk/go-current`. Existing SDK directories are kept. Reinstalling the same version is idempotent: the existing SDK is reused and becomes the default.
 
-## Миграция старого `~/.local/go`
+## Migrate Legacy `~/.local/go`
 
-Если старый Go был установлен в `~/.local/go`, его можно явно перенести в `~/sdk/goX.Y.Z`:
+If an older Go installation lives in `~/.local/go`, migrate it explicitly:
 
 ```bash
 gosdkctl migrate-local
 ```
 
-Команда читает версию из `~/.local/go/VERSION`, переносит каталог в `~/sdk/<version>` и обновляет `~/sdk/go-current`. Если такая версия уже есть в `~/sdk`, каталог не перезаписывается, а существующий SDK становится основным.
+The command reads `~/.local/go/VERSION`, moves the directory into `~/sdk/<version>`, and updates `~/sdk/go-current`. If that version already exists in `~/sdk`, it is not overwritten; the existing SDK becomes the default.
 
-## Переключение SDK по умолчанию
+## Switch the Default SDK
 
 ```bash
 gosdkctl switch go1.24.2
 gosdkctl current
 ```
 
-Обновляется только `~/sdk/go-current`. Уже открытые оболочки потребуют обновления окружения.
+Only `~/sdk/go-current` is changed. Already-open shell sessions need their environment refreshed.
 
-## Временное переключение в оболочке
+## Shell Integration
 
-Сначала установите managed block в конфиг оболочки:
+Install the managed block into your shell config:
 
 ```bash
 gosdkctl init zsh
 ```
 
-Для bash:
+For bash:
 
 ```bash
 gosdkctl init bash
 ```
 
-Команда полностью переписывает только блок между маркерами `# >>> gosdkctl init >>>` и `# <<< gosdkctl init <<<` в `~/.zshrc` или `~/.bashrc`. Остальной пользовательский конфиг не меняется.
+The command rewrites only the block between `# >>> gosdkctl init >>>` and `# <<< gosdkctl init <<<` in `~/.zshrc` or `~/.bashrc`. The rest of the user config is preserved.
 
-После этого в новых shell-сессиях доступны `go`, `gosdkctl`, `go-sdk`, `usego`, `gosetdefault` и `gocurrent`.
+New shell sessions get `go`, `gosdkctl`, `go-sdk`, `usego`, `gosetdefault`, and `gocurrent`.
 
-Managed block выбирает `GOROOT` по каскаду: сначала `~/sdk/go-current`, затем legacy `~/.local/go`, затем самая новая версия `goX.Y.Z` из `~/sdk`.
+The managed block resolves `GOROOT` with this fallback chain: `~/sdk/go-current`, legacy `~/.local/go`, then the newest `goX.Y.Z` directory in `~/sdk`.
 
-Бинарник не может напрямую изменить уже запущенную родительскую оболочку, поэтому `gosdkctl env` также умеет выводить команды экспорта:
+A binary cannot directly mutate the already-running parent shell, so `gosdkctl env` can also print shell exports:
 
 ```bash
 eval "$(gosdkctl env go1.24.2)"
@@ -129,7 +131,7 @@ eval "$(gosdkctl env default)"
 eval "$(gosdkctl env /opt/custom-go)"
 ```
 
-Managed block добавляет такие хелперы:
+The managed block adds these helpers:
 
 ```bash
 usego() {
@@ -142,41 +144,40 @@ gosetdefault() {
 }
 
 gocurrent() {
-  gosdkctl current
   which go
   go version
 }
 ```
 
-## Диагностика
+## Diagnostics
 
 ```bash
 gosdkctl doctor
 ```
 
-Отчёт включает `GOROOT`, `GOPATH`, `PATH`, целевой каталог `go-current`, наличие устаревшего `~/.local/go`, видимость бинарника `go` в `PATH` и установленные версии SDK.
+The report includes `GOROOT`, `GOPATH`, `PATH`, the `go-current` target, whether legacy `~/.local/go` exists, the `go` binary visible through `PATH`, and installed SDK versions.
 
-## Сборка
+## Build From Source
 
-Сборка из исходников нужна только для разработки самого `gosdkctl`. Для bootstrap чистой машины используйте готовый бинарник из GitHub Releases.
+Building from source is only needed when developing `gosdkctl` itself. For bootstrapping a clean machine, use the release binary from GitHub Releases.
 
 ```bash
 go build -o ~/.local/bin/gosdkctl ./cmd/gosdkctl
 ```
 
-## Self install
+## Self Install
 
-Если бинарник уже запущен из временного места, он может сам установить себя в стандартный пользовательский путь:
+If the binary is running from a temporary location, it can install itself into the standard user path:
 
 ```bash
 gosdkctl self install
 ```
 
-Команда создает `~/.local/bin/gosdkctl` и совместимый symlink `~/.local/bin/go-sdk`.
+The command creates `~/.local/bin/gosdkctl` and a compatible symlink at `~/.local/bin/go-sdk`.
 
-## Bootstrap на чистой системе
+## Clean Machine Bootstrap
 
-Минимальный сценарий после получения первого бинарника из GitHub Releases:
+Minimal flow after downloading the first release binary:
 
 ```bash
 ./gosdkctl self install
@@ -185,7 +186,7 @@ gosdkctl self install
 exec zsh
 ```
 
-Для bash:
+For bash:
 
 ```bash
 ./gosdkctl self install
