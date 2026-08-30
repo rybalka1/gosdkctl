@@ -6,23 +6,46 @@
 
 The workflow is intentionally similar to tools like `uv`: one small binary owns installation, discovery, version switching, shell integration, and diagnostics for a local developer environment.
 
-## Quick Start: Linux x86_64
+## Supported Platforms
 
-On a clean Linux x86_64 machine, you do not need to install Go manually. Download the release binary first:
+Release binaries are currently published for:
+
+```text
+gosdkctl-linux-amd64
+gosdkctl-darwin-arm64
+```
+
+On both Linux and macOS, `gosdkctl install latest` downloads the Go SDK archive for the current `GOOS/GOARCH`, verifies the official SHA256 checksum, and installs it under `~/sdk`.
+
+## Quick Start: Linux amd64
+
+On a clean Linux amd64 machine, you do not need to install Go manually. Download the release binary first:
 
 ```bash
 curl -L -o gosdkctl https://github.com/rybalka1/gosdkctl/releases/download/v1.0.0/gosdkctl-linux-amd64
 chmod +x gosdkctl
-./gosdkctl self install
-~/.local/bin/gosdkctl init zsh
+./gosdkctl setup zsh
 ~/.local/bin/gosdkctl install latest
 exec zsh
 ```
 
-For bash, replace the shell initialization and restart commands:
+## Quick Start: macOS arm64
+
+On Apple Silicon macOS, use the darwin arm64 release binary. The flow is otherwise the same as Linux:
 
 ```bash
-~/.local/bin/gosdkctl init bash
+curl -L -o gosdkctl https://github.com/rybalka1/gosdkctl/releases/download/v1.0.0/gosdkctl-darwin-arm64
+chmod +x gosdkctl
+./gosdkctl setup zsh
+~/.local/bin/gosdkctl install latest
+exec zsh
+```
+
+For bash on either platform, run `setup bash` instead of `setup zsh`:
+
+```bash
+./gosdkctl setup bash
+~/.local/bin/gosdkctl install latest
 exec bash
 ```
 
@@ -51,6 +74,7 @@ gosdkctl list
 gosdkctl current
 gosdkctl install <archive.tar.gz|goX.Y.Z|latest>
 gosdkctl migrate-local
+gosdkctl setup [zsh|bash|auto]
 gosdkctl init [zsh|bash|auto]
 gosdkctl self install
 gosdkctl switch <goX.Y.Z>
@@ -80,6 +104,7 @@ Install a local archive:
 
 ```bash
 gosdkctl install ~/Downloads/go1.26.1.linux-amd64.tar.gz
+gosdkctl install ~/Downloads/go1.26.1.darwin-arm64.tar.gz
 ```
 
 When downloading from `go.dev`, `gosdkctl` selects the archive for the current `GOOS/GOARCH` and verifies its SHA256 checksum from the official download metadata. It then extracts the SDK into `~/sdk/go1.26.1`, validates `go/VERSION` and `go/bin/go`, and updates `~/sdk/go-current`. Existing SDK directories are kept. Reinstalling the same version is idempotent: the existing SDK is reused and becomes the default.
@@ -139,11 +164,12 @@ usego() {
 }
 
 gosetdefault() {
-  gosdkctl switch "$1"
+  gosdkctl switch "$1" || return
   usego default
 }
 
 gocurrent() {
+  gosdkctl current
   which go
   go version
 }
@@ -177,11 +203,10 @@ The command creates `~/.local/bin/gosdkctl` and a compatible symlink at `~/.loca
 
 ## Clean Machine Bootstrap
 
-Minimal flow after downloading the first release binary:
+Minimal flow after downloading the platform-specific release binary:
 
 ```bash
-./gosdkctl self install
-~/.local/bin/gosdkctl init zsh
+./gosdkctl setup zsh
 ~/.local/bin/gosdkctl install latest
 exec zsh
 ```
@@ -189,8 +214,7 @@ exec zsh
 For bash:
 
 ```bash
-./gosdkctl self install
-~/.local/bin/gosdkctl init bash
+./gosdkctl setup bash
 ~/.local/bin/gosdkctl install latest
 exec bash
 ```

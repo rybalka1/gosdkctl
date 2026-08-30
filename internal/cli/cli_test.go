@@ -20,7 +20,7 @@ func TestRunHelp(t *testing.T) {
 	if err := command.Run(context.Background(), []string{"-help"}); err != nil {
 		t.Fatalf("Run(-help) error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "gosdkctl migrate-local") || !strings.Contains(stdout.String(), "gosdkctl init [zsh|bash|auto]") {
+	if !strings.Contains(stdout.String(), "gosdkctl migrate-local") || !strings.Contains(stdout.String(), "gosdkctl setup [zsh|bash|auto]") {
 		t.Fatalf("help output does not include expected commands:\n%s", stdout.String())
 	}
 }
@@ -74,6 +74,24 @@ func TestRunInit(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "updated zsh config") {
 		t.Fatalf("init output = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(manager.Home, ".zshrc")); err != nil {
+		t.Fatalf(".zshrc was not created: %v", err)
+	}
+}
+
+func TestRunSetup(t *testing.T) {
+	t.Parallel()
+
+	command, manager, stdout, _ := newTestCommand(t, "")
+	if err := command.Run(context.Background(), []string{"setup", "zsh"}); err != nil {
+		t.Fatalf("Run(setup zsh) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "installed gosdkctl ->") || !strings.Contains(stdout.String(), "updated zsh config") {
+		t.Fatalf("setup output = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(manager.Home, ".local", "bin", "gosdkctl")); err != nil {
+		t.Fatalf("gosdkctl was not installed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(manager.Home, ".zshrc")); err != nil {
 		t.Fatalf(".zshrc was not created: %v", err)

@@ -30,6 +30,8 @@ type Manager struct {
 	goDownloadAPI   string
 	goDownloadBase  string
 	selfInstallName string
+	targetOS        string
+	targetArch      string
 }
 
 type InstalledVersion struct {
@@ -81,6 +83,8 @@ func NewManager(cfg config.Config) *Manager {
 		goDownloadAPI:   "https://go.dev/dl/?mode=json&include=all",
 		goDownloadBase:  "https://go.dev/dl/",
 		selfInstallName: "gosdkctl",
+		targetOS:        runtime.GOOS,
+		targetArch:      runtime.GOARCH,
 	}
 }
 
@@ -378,10 +382,14 @@ func (m *Manager) Doctor() (string, error) {
 func (m *Manager) Env(target string) (ShellEnv, error) {
 	var selected InstalledVersion
 	if target == "" || target == "default" {
-		var err error
-		selected, err = m.Current()
-		if err != nil {
-			return ShellEnv{}, err
+		if _, err := os.Stat(filepath.Join(m.cfg.DefaultLink, "bin", "go")); err == nil {
+			selected = InstalledVersion{Name: filepath.Base(m.cfg.DefaultLink), Path: m.cfg.DefaultLink}
+		} else {
+			var err error
+			selected, err = m.Current()
+			if err != nil {
+				return ShellEnv{}, err
+			}
 		}
 	} else if version.IsGoVersionDir(target) {
 		path := filepath.Join(m.cfg.SDKDir, target)
@@ -487,7 +495,7 @@ func (m *Manager) resolveDownload(ctx context.Context, selector string) (goFileM
 	if err != nil {
 		return goFileMeta{}, err
 	}
-	targetOS, targetArch, err := goPlatform()
+	targetOS, targetArch, err := m.goPlatform()
 	if err != nil {
 		return goFileMeta{}, err
 	}
@@ -566,8 +574,21 @@ func (m *Manager) httpGet(ctx context.Context, url string) (*http.Response, erro
 	return resp, nil
 }
 
-func goPlatform() (string, string, error) {
-	return runtime.GOOS, runtime.GOARCH, nil
+func (m *Manager) goPlatform() (string, string, error) {
+	if m.targetOS == "" || m.targetArch == "" {
+		return "", "", fmt.Errorf("target Go platform is incomplete")
+	}
+	switch m.targetOS {
+	case "linux", "darwin":
+	default:
+		return "", "", fmt.Errorf("unsupported Go SDK OS %q", m.targetOS)
+	}
+	switch m.targetArch {
+	case "amd64", "arm64":
+	default:
+		return "", "", fmt.Errorf("unsupported Go SDK architecture %q", m.targetArch)
+	}
+	return m.targetOS, m.targetArch, nil
 }
 
 func (m *Manager) shellBlock(shell string) (string, error) {
@@ -604,7 +625,7 @@ func (m *Manager) shellBlock(shell string) (string, error) {
 			"  eval \"$(gosdkctl env \"${1:-default}\")\"",
 			"}",
 			"gosetdefault() {",
-			"  gosdkctl switch \"$1\"",
+			"  gosdkctl switch \"$1\" || return",
 			"  usego default",
 			"}",
 			"gocurrent() {",

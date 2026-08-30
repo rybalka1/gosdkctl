@@ -54,6 +54,15 @@ func (c *Command) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("usage: gosdkctl install <archive.tar.gz|version|latest>")
 		}
 		return c.install(ctx, args[1])
+	case "setup":
+		if len(args) > 2 {
+			return fmt.Errorf("usage: gosdkctl setup [zsh|bash|auto]")
+		}
+		shell := "auto"
+		if len(args) > 1 {
+			shell = args[1]
+		}
+		return c.setup(shell)
 	case "self":
 		if len(args) != 2 || args[1] != "install" {
 			return fmt.Errorf("usage: gosdkctl self install")
@@ -103,7 +112,10 @@ func (c *Command) status() error {
 	if len(versions) == 0 {
 		fmt.Fprintln(c.stdout, "(none)")
 	} else {
-		fmt.Fprintln(c.stdout, strings.Join(versions, "\n"))
+		fprintln, err := fmt.Fprintln(c.stdout, strings.Join(versions, "\n"))
+		if err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(c.stdout)
 	c.help()
@@ -209,12 +221,32 @@ func (c *Command) selfInstall() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(c.stdout, "installed gosdkctl -> %s\n", result.BinaryPath)
-	fmt.Fprintf(c.stdout, "go-sdk -> %s\n", result.AliasPath)
+	c.printSelfInstallResult(result)
 	if !result.OnPath {
-		fmt.Fprintf(c.stderr, "warning: %s is not in PATH for this shell; run `gosdkctl init zsh` or `gosdkctl init bash`\n", result.BinDir)
+		fmt.Fprintf(c.stderr, "warning: %s is not in PATH for this shell; run `gosdkctl setup zsh` or `gosdkctl setup bash`\n", result.BinDir)
 	}
 	return nil
+}
+
+func (c *Command) setup(shell string) error {
+	install, err := c.manager.SelfInstall("")
+	if err != nil {
+		return err
+	}
+	c.printSelfInstallResult(install)
+
+	init, err := c.manager.InitShell(shell)
+	if err != nil {
+		return err
+	}
+	c.printShellInitResult(init)
+	fmt.Fprintf(c.stdout, "restart shell or run: eval \"$(gosdkctl env default)\"\n")
+	return nil
+}
+
+func (c *Command) printSelfInstallResult(result sdk.SelfInstallResult) {
+	fmt.Fprintf(c.stdout, "installed gosdkctl -> %s\n", result.BinaryPath)
+	fmt.Fprintf(c.stdout, "go-sdk -> %s\n", result.AliasPath)
 }
 
 func (c *Command) migrateLocal() error {
@@ -236,12 +268,16 @@ func (c *Command) initShell(shell string) error {
 	if err != nil {
 		return err
 	}
+	c.printShellInitResult(result)
+	return nil
+}
+
+func (c *Command) printShellInitResult(result sdk.ShellInitResult) {
 	if result.Changed {
 		fmt.Fprintf(c.stdout, "updated %s config: %s\n", result.Shell, result.Path)
 	} else {
 		fmt.Fprintf(c.stdout, "%s config already up to date: %s\n", result.Shell, result.Path)
 	}
-	return nil
 }
 
 func (c *Command) doctor() error {
@@ -272,6 +308,7 @@ func (c *Command) help() {
 	fmt.Fprintln(c.stdout, "  gosdkctl switch <version>")
 	fmt.Fprintln(c.stdout, "  gosdkctl install <archive|version|latest>")
 	fmt.Fprintln(c.stdout, "  gosdkctl migrate-local")
+	fmt.Fprintln(c.stdout, "  gosdkctl setup [zsh|bash|auto]")
 	fmt.Fprintln(c.stdout, "  gosdkctl init [zsh|bash|auto]")
 	fmt.Fprintln(c.stdout, "  gosdkctl self install")
 	fmt.Fprintln(c.stdout, "  gosdkctl choose")

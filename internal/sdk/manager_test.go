@@ -168,6 +168,48 @@ func TestInstallDownloadSpecificVersion(t *testing.T) {
 	}
 }
 
+func TestInstallDownloadSelectsDarwinArchive(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	manager.targetOS = "darwin"
+	manager.targetArch = "arm64"
+	archivePath := filepath.Join(t.TempDir(), "go1.31.0.tar.gz")
+	writeArchive(t, archivePath, "go1.31.0")
+	archiveData, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	sum := sha256.Sum256(archiveData)
+	filename := "go1.31.0.darwin-arm64.tar.gz"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/dl/":
+			fmt.Fprintf(w, `[{"version":"go1.31.0","stable":true,"files":[
+				{"filename":"go1.31.0.linux-amd64.tar.gz","os":"linux","arch":"amd64","version":"go1.31.0","sha256":"ignored","kind":"archive"},
+				{"filename":%q,"os":"darwin","arch":"arm64","version":"go1.31.0","sha256":%q,"kind":"archive"}
+			]}]`, filename, hex.EncodeToString(sum[:]))
+		case "/dl/" + filename:
+			_, _ = w.Write(archiveData)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	manager.goDownloadAPI = server.URL + "/dl/?mode=json&include=all"
+	manager.goDownloadBase = server.URL + "/dl/"
+
+	result, err := manager.InstallDownload(context.Background(), "go1.31.0")
+	if err != nil {
+		t.Fatalf("InstallDownload(go1.31.0) error = %v", err)
+	}
+	if result.Version.Name != "go1.31.0" || result.File != filename {
+		t.Fatalf("InstallDownload(go1.31.0) = %+v", result)
+	}
+}
+
 func TestInstallDownloadRejectsBadChecksum(t *testing.T) {
 	t.Parallel()
 
@@ -359,6 +401,27 @@ func TestSwitchRejectsNonSymlinkCurrent(t *testing.T) {
 
 	if _, err := manager.Switch("go1.26.1"); err == nil {
 		t.Fatal("Switch() replaced non-symlink go-current")
+	}
+}
+
+func TestEnvDefaultUsesDefaultLink(t *testing.T) {
+	t.Parallel()
+
+	manager := newTestManager(t)
+	makeSDK(t, manager.cfg.SDKDir, "go1.25.4")
+	if _, err := manager.Switch("go1.25.4"); err != nil {
+		t.Fatalf("Switch() error = %v", err)
+	}
+
+	env, err := manager.Env("default")
+	if err != nil {
+		t.Fatalf("Env(default) error = %v", err)
+	}
+	if env.GOROOT != manager.cfg.DefaultLink {
+		t.Fatalf("Env(default).GOROOT = %q, want %q", env.GOROOT, manager.cfg.DefaultLink)
+	}
+	if !strings.HasPrefix(env.PATH, filepath.Join(manager.cfg.DefaultLink, "bin")) {
+		t.Fatalf("Env(default).PATH = %q", env.PATH)
 	}
 }
 

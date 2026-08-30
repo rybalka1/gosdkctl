@@ -6,23 +6,46 @@
 
 Рабочий процесс намеренно похож на инструменты вроде `uv`: один небольшой бинарник отвечает за установку, обнаружение, переключение и диагностику локальной среды разработчика.
 
-## Быстрый старт Linux x86_64
+## Поддерживаемые платформы
 
-На чистой Linux x86_64-системе Go вручную ставить не нужно. Скачайте готовый бинарник из первого релиза:
+В релизе сейчас публикуются бинарники для:
+
+```text
+gosdkctl-linux-amd64
+gosdkctl-darwin-arm64
+```
+
+На Linux и macOS команда `gosdkctl install latest` скачивает архив Go SDK для текущих `GOOS/GOARCH`, проверяет официальный SHA256 checksum и устанавливает SDK в `~/sdk`.
+
+## Быстрый старт Linux amd64
+
+На чистой Linux amd64-системе Go вручную ставить не нужно. Скачайте готовый бинарник из релиза:
 
 ```bash
 curl -L -o gosdkctl https://github.com/rybalka1/gosdkctl/releases/download/v1.0.0/gosdkctl-linux-amd64
 chmod +x gosdkctl
-./gosdkctl self install
-~/.local/bin/gosdkctl init zsh
+./gosdkctl setup zsh
 ~/.local/bin/gosdkctl install latest
 exec zsh
 ```
 
-Для bash замените `init zsh` и `exec zsh`:
+## Быстрый старт macOS arm64
+
+На macOS с Apple Silicon используйте darwin arm64 бинарник. Остальной сценарий такой же, как на Linux:
 
 ```bash
-~/.local/bin/gosdkctl init bash
+curl -L -o gosdkctl https://github.com/rybalka1/gosdkctl/releases/download/v1.0.0/gosdkctl-darwin-arm64
+chmod +x gosdkctl
+./gosdkctl setup zsh
+~/.local/bin/gosdkctl install latest
+exec zsh
+```
+
+Для bash на любой платформе используйте `setup bash` вместо `setup zsh`:
+
+```bash
+./gosdkctl setup bash
+~/.local/bin/gosdkctl install latest
 exec bash
 ```
 
@@ -51,6 +74,7 @@ gosdkctl list
 gosdkctl current
 gosdkctl install <archive.tar.gz|goX.Y.Z|latest>
 gosdkctl migrate-local
+gosdkctl setup [zsh|bash|auto]
 gosdkctl init [zsh|bash|auto]
 gosdkctl self install
 gosdkctl switch <goX.Y.Z>
@@ -80,6 +104,7 @@ gosdkctl install go1.26.1
 
 ```bash
 gosdkctl install ~/Downloads/go1.26.1.linux-amd64.tar.gz
+gosdkctl install ~/Downloads/go1.26.1.darwin-arm64.tar.gz
 ```
 
 Для загрузки с `go.dev` команда выбирает архив под текущие `GOOS/GOARCH` и проверяет `sha256` из официального download metadata. Затем распаковывает архив в `~/sdk/go1.26.1`, проверяет `go/VERSION` и `go/bin/go`, обновляет `~/sdk/go-current`. Существующие каталоги SDK не удаляются. Повторная установка той же версии идемпотентна: существующий SDK переиспользуется и становится основным.
@@ -139,7 +164,7 @@ usego() {
 }
 
 gosetdefault() {
-  gosdkctl switch "$1"
+  gosdkctl switch "$1" || return
   usego default
 }
 
@@ -178,11 +203,10 @@ gosdkctl self install
 
 ## Bootstrap на чистой системе
 
-Минимальный сценарий после получения первого бинарника из GitHub Releases:
+Минимальный сценарий после получения платформенного бинарника из GitHub Releases:
 
 ```bash
-./gosdkctl self install
-~/.local/bin/gosdkctl init zsh
+./gosdkctl setup zsh
 ~/.local/bin/gosdkctl install latest
 exec zsh
 ```
@@ -190,8 +214,7 @@ exec zsh
 Для bash:
 
 ```bash
-./gosdkctl self install
-~/.local/bin/gosdkctl init bash
+./gosdkctl setup bash
 ~/.local/bin/gosdkctl install latest
 exec bash
 ```
